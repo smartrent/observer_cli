@@ -1982,10 +1982,10 @@ memory_command_keeps_beam_data_when_allocator_fails_test() ->
     ?assertEqual(<<"probe_failed">>, maps:get(<<"reason_code">>, AllocatorProbe)).
 
 tui_resource_counts_match_snapshot_window_test() ->
-    Tui = maps:get(
-        sys_info,
-        observer_cli_system:collect_system_info("printf 'header\\n 0 0 0 0\\n'")
+    {SystemInfo, _} = observer_cli_system:collect_system_info(
+        "printf 'header\\n 0 0 0 0\\n'", undefined
     ),
+    Tui = maps:get(sys_info, SystemInfo),
     Resources = maps:get(<<"resources">>, maps:get(<<"data">>, snapshot(#{}))),
     assert_count_within(
         proplists:get_value(process_count, Tui),

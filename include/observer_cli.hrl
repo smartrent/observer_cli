@@ -75,7 +75,9 @@
     process = #process{} :: #process{},
     port = ?DEFAULT_INTERVAL :: pos_integer(),
     plug = #plug{} :: #plug{},
-    auto_row = true :: boolean()
+    auto_row = true :: boolean(),
+    ps_cmd = undefined :: undefined | no_ps | iodata(),
+    cpu_gauge = undefined :: undefined | observer_cli_lib:cpu_gauge()
 }).
 
 -export_type([

@@ -56,7 +56,7 @@ collect_home_snapshot_test() ->
         scheduler_usage = ?DISABLE
     },
     StableInfo = observer_cli:get_stable_system_info(),
-    LastStats = observer_cli:get_incremental_stats(?DISABLE),
+    LastStats = observer_cli:get_incremental_stats(?DISABLE, undefined, true),
     {Snapshot, NewStats} =
         observer_cli:collect_home_snapshot(
             "printf 'header\\n 1 2\\n'", Home, StableInfo, LastStats, 15, true
@@ -83,7 +83,7 @@ collect_home_snapshot_test() ->
             lists:flatten(maps:get(refresh_prompt, Snapshot))
         )
     ),
-    ?assertMatch({_, _, _, _, _}, NewStats).
+    ?assertMatch({_, _, _, _, _, _}, NewStats).
 
 get_current_initial_call_test() ->
     Call = [
@@ -109,8 +109,199 @@ render_system_line_unsupported_atom_status_test() ->
 render_system_line_missing_output_test() ->
     PsCmd = "printf ''",
     StableInfo = observer_cli:get_stable_system_info(),
-    Line = observer_cli:render_system_line(PsCmd, StableInfo),
-    ?assert(string:find(lists:flatten(Line), "ps -o pcpu") =/= nomatch).
+    Line = lists:flatten(observer_cli:render_system_line(PsCmd, StableInfo)),
+    ?assert(string:find(Line, "cpu rate") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Line, "ps -o pcpu")),
+    ?assert(string:find(Line, "/proc pmem") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Line, "ps -o pmem")).
+
+render_system_line_proc_fallback_test() ->
+    PsCmd = "printf ''",
+    StableInfo = observer_cli:get_stable_system_info(),
+    LineNoSample = lists:flatten(
+        observer_cli:render_system_line(PsCmd, StableInfo, observer_cli:get_atom_status(), "--")
+    ),
+    ?assert(string:find(LineNoSample, "--%") =/= nomatch),
+    LineWithPercent = lists:flatten(
+        observer_cli:render_system_line(PsCmd, StableInfo, observer_cli:get_atom_status(), "42.0")
+    ),
+    ?assert(string:find(LineWithPercent, "42.0%") =/= nomatch),
+    case os:type() of
+        {unix, linux} ->
+            ?assertNotEqual("--", observer_cli_lib:proc_mem_percent());
+        _ ->
+            ok
+    end.
+
+home_ps_cmd_probes_once_test() ->
+    Marker = filename:join(
+        case os:getenv("TMPDIR") of
+            false -> "/tmp";
+            Dir -> Dir
+        end,
+        "observer_cli_home_probe_test"
+    ),
+    file:delete(Marker),
+    Cmd =
+        "printf x >> " ++ Marker ++
+            "; printf \"ps: invalid option -- 'o'\\n"
+            "BusyBox v1.37.0 multi-call binary.\\n\"",
+    ?assertEqual(no_ps, observer_cli:resolve_ps_cmd(Cmd)),
+    ?assertEqual(1, marker_count(Marker)),
+    Opts = #view_opts{ps_cmd = no_ps},
+    lists:foreach(
+        fun(_) -> ?assertEqual(no_ps, observer_cli:home_ps_cmd(Opts)) end,
+        lists:seq(1, 10)
+    ),
+    ?assertEqual(1, marker_count(Marker)),
+    file:delete(Marker).
+
+marker_count(Marker) ->
+    case file:read_file(Marker) of
+        {ok, Bin} -> byte_size(Bin);
+        {error, _} -> 0
+    end.
+
+resolve_ps_cmd_test() ->
+    BusyBoxLike =
+        "printf \"ps: invalid option -- 'o'\\n"
+        "BusyBox v1.37.0 (Ubuntu 1:1.37.0) multi-call binary.\\n\"",
+    ?assertEqual(no_ps, observer_cli:resolve_ps_cmd(BusyBoxLike)),
+    ?assertEqual(no_ps, observer_cli:resolve_ps_cmd("printf ''")),
+    Working = "printf 'header\\n 1.5 0.3\\n'",
+    ?assertEqual(Working, observer_cli:resolve_ps_cmd(Working)).
+
+resolve_ps_cmd_rejects_non_numeric_columns_test() ->
+    TwoFieldBanners = [
+        "printf \"ps: invalid option -- 'o'\\nBusyBox v1.37.0\\n\"",
+        "printf 'ps: Unknown option\\nusage: ps\\n'",
+        "printf 'ps: error\\nbad arg\\n'",
+        "printf 'header\\n 1.5 huge\\n'",
+        "printf 'header\\n -1 0.3\\n'"
+    ],
+    lists:foreach(
+        fun(Cmd) -> ?assertEqual(no_ps, observer_cli:resolve_ps_cmd(Cmd)) end,
+        TwoFieldBanners
+    ),
+    StableInfo = observer_cli:get_stable_system_info(),
+    Line = lists:flatten(
+        observer_cli:render_system_line(
+            "printf \"ps: invalid option -- 'o'\\nBusyBox v1.37.0\\n\"",
+            StableInfo,
+            observer_cli:get_atom_status(),
+            "42.0"
+        )
+    ),
+    ?assertEqual(nomatch, string:find(Line, "BusyBox")),
+    ?assertEqual(nomatch, string:find(Line, "v1.37.0")),
+    ?assert(string:find(Line, "42.0%") =/= nomatch).
+
+reclaim_cpu_gauge_carries_worker_gauge_test() ->
+    Gauge = {{1000, 2000}, "12.3"},
+    Worker = spawn(fun() -> gauge_responder(Gauge) end),
+    Opts = #view_opts{ps_cmd = no_ps},
+    ?assertEqual(
+        Opts#view_opts{cpu_gauge = Gauge},
+        observer_cli:reclaim_cpu_gauge(Opts, [Worker, self()])
+    ).
+
+reclaim_cpu_gauge_skips_working_ps_test() ->
+    Worker = spawn(fun() -> gauge_responder({{1, 2}, "9.9"}) end),
+    Opts = #view_opts{ps_cmd = "ps -o pcpu,pmem 1"},
+    ?assertEqual(Opts, observer_cli:reclaim_cpu_gauge(Opts, [Worker, self()])),
+    ?assert(erlang:is_process_alive(Worker)),
+    erlang:exit(Worker, kill).
+
+reclaim_cpu_gauge_tolerates_dead_worker_test() ->
+    Worker = spawn(fun() -> ok end),
+    Opts = #view_opts{ps_cmd = no_ps},
+    ?assertEqual(Opts, observer_cli:reclaim_cpu_gauge(Opts, [Worker, self()])),
+    ?assertEqual([], [M || {cpu_gauge, _, _} = M <- drain_messages()]).
+
+gauge_responder(Gauge) ->
+    receive
+        {cpu_gauge, From, Ref} -> erlang:send(From, {cpu_gauge, Ref, Gauge})
+    after 5000 -> ok
+    end.
+
+drain_messages() ->
+    receive
+        Msg -> [Msg | drain_messages()]
+    after 0 -> []
+    end.
+
+carried_cpu_gauge_reports_percent_on_first_frame_test() ->
+    case os:type() of
+        {unix, linux} ->
+            Fresh = observer_cli:get_incremental_stats(?DISABLE, undefined, true),
+            ?assertEqual("--", observer_cli:cpu_percent_from_stats(Fresh)),
+            {{Ticks, Ms}, Percent} = element(6, Fresh),
+            Aged = {{Ticks, Ms - ?MIN_INTERVAL - 1}, Percent},
+            Carried = observer_cli:get_incremental_stats(?DISABLE, Aged, true),
+            ?assertNotEqual("--", observer_cli:cpu_percent_from_stats(Carried)),
+            {_, _, Next} = observer_cli:node_stats(Carried, ?DISABLE, true),
+            ?assertEqual(
+                observer_cli:cpu_percent_from_stats(Carried),
+                observer_cli:cpu_percent_from_stats(Next)
+            );
+        _ ->
+            ok
+    end.
+
+render_system_line_no_ps_test() ->
+    StableInfo = observer_cli:get_stable_system_info(),
+    Line = lists:flatten(
+        observer_cli:render_system_line(no_ps, StableInfo, observer_cli:get_atom_status(), "42.0")
+    ),
+    ?assert(string:find(Line, "42.0%") =/= nomatch),
+    Working = "printf 'header\\n 1.5 0.3\\n'",
+    WorkingLine = lists:flatten(
+        observer_cli:render_system_line(Working, StableInfo, observer_cli:get_atom_status(), "42.0")
+    ),
+    ?assert(string:find(WorkingLine, "1.5%") =/= nomatch),
+    ?assert(string:find(WorkingLine, "42.0%") =:= nomatch).
+
+render_system_line_real_ps_test() ->
+    RealPs = "printf '%%CPU %%MEM\\n 277  0.2\\n'",
+    StableInfo = observer_cli:get_stable_system_info(),
+    Line = lists:flatten(
+        observer_cli:render_system_line(RealPs, StableInfo, observer_cli:get_atom_status(), "7.5")
+    ),
+    ?assert(string:find(Line, "277%") =/= nomatch),
+    ?assert(string:find(Line, "0.2%") =/= nomatch),
+    ?assertEqual(nomatch, string:find(Line, "7.5%")),
+    ?assertEqual(RealPs, observer_cli:resolve_ps_cmd(RealPs)).
+
+node_stats_skips_cpu_sample_when_ps_works_test() ->
+    Unsampled = observer_cli:get_incremental_stats(?DISABLE, undefined, false),
+    ?assertEqual(undefined, element(6, Unsampled)),
+    ?assertEqual("--", observer_cli:cpu_percent_from_stats(Unsampled)),
+    {_, _, Next} = observer_cli:node_stats(Unsampled, ?DISABLE, false),
+    ?assertEqual(undefined, element(6, Next)),
+    ?assertEqual("--", observer_cli:cpu_percent_from_stats(Next)),
+    case os:type() of
+        {unix, linux} ->
+            Sampled = observer_cli:get_incremental_stats(?DISABLE, undefined, true),
+            ?assertNotEqual(undefined, element(6, Sampled));
+        _ ->
+            ok
+    end.
+
+node_stats_cpu_gauge_rate_limited_test() ->
+    case os:type() of
+        {unix, linux} ->
+            Stats0 = observer_cli:get_incremental_stats(?DISABLE, undefined, true),
+            ?assertEqual("--", observer_cli:cpu_percent_from_stats(Stats0)),
+            timer:sleep(?MIN_INTERVAL + 100),
+            {_, _, Stats1} = observer_cli:node_stats(Stats0, ?DISABLE, true),
+            Percent1 = observer_cli:cpu_percent_from_stats(Stats1),
+            ?assertNotEqual("--", Percent1),
+            ?assertMatch({_Float, []}, string:to_float(Percent1)),
+            {_, _, Stats2} = observer_cli:node_stats(Stats1, ?DISABLE, true),
+            ?assertEqual(Percent1, observer_cli:cpu_percent_from_stats(Stats2));
+        _ ->
+            ok
+    end.
 
 accept_net_ticktime_result_test() ->
     ?assertEqual(ok, observer_cli:accept_net_ticktime_result(change_initiated, 60)),
@@ -457,8 +648,8 @@ display_unique_flag_label_value_test() ->
     end.
 
 node_stats_test() ->
-    Stats = observer_cli:get_incremental_stats(?DISABLE),
-    {Diffs, _Sched, _New} = observer_cli:node_stats(Stats, ?DISABLE),
+    Stats = observer_cli:get_incremental_stats(?DISABLE, undefined, true),
+    {Diffs, _Sched, _New} = observer_cli:node_stats(Stats, ?DISABLE, true),
     {InDiff, OutDiff, _GcDiff, _WordsDiff} = Diffs,
     ?assert(string:find(lists:flatten(InDiff), "/") =/= nomatch),
     ?assert(string:find(lists:flatten(OutDiff), "/") =/= nomatch).

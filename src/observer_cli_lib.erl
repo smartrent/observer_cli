@@ -47,10 +47,32 @@
 -export([sublist/3]).
 -export([sbcs_to_mbcs/2]).
 -export([pipe/2]).
+-export([ps_output_fields/1]).
+-export([is_ps_number/1]).
+-export([resolve_ps_cmd/2]).
+-export([proc_status_field_kb/2]).
+-export([proc_meminfo_total_kb/0]).
+-export([proc_mem_percent/0]).
+-export([cpu_time_sample/0]).
+-export([cpu_percent/2]).
+-export([cpu_percent_gauge/2]).
 
 -ifdef(TEST).
 -export([visible_length/1, add_extra_remainder/3, join_lines/1]).
+-export([parse_proc_stat_utime_stime/1]).
 -endif.
+
+%% A CPU time reading: cumulative user+sys clock ticks for this OS process
+-type cpu_sample() :: {Ticks :: non_neg_integer(), MonotonicMs :: integer()}.
+%% The reference sample a rate is measured from, plus the percent last derived
+-type cpu_gauge() :: {cpu_sample() | undefined, Percent :: string()}.
+
+-export_type([cpu_sample/0, cpu_gauge/0]).
+
+%% USER_HZ (sysconf(_SC_CLK_TCK)) is 100 on virtually all Linux systems,
+%% including embedded/BusyBox targets, regardless of the kernel's internal
+%% timer frequency; /proc/<pid>/stat's utime/stime are always scaled to it.
+-define(CLOCK_TICKS_PER_SEC, 100).
 
 -spec uptime() -> list().
 uptime() ->
@@ -491,6 +513,161 @@ sbcs_to_mbcs(TypeList, STMList) ->
             Acc
     end,
     maps:to_list(lists:foldl(FoldlFun, #{}, STMList)).
+
+%% @doc The data columns of a `ps' invocation: its second output line, split
+%% on whitespace with empties dropped. Empty when there is no second line.
+-spec ps_output_fields(iodata()) -> [string()].
+ps_output_fields(Output) ->
+    case string:split(Output, "\n", all) of
+        [_, CmdValue | _] ->
+            lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all));
+        _ ->
+            []
+    end.
+
+%% @doc Whether a ps column holds a non-negative number ("0", "1.5", "277").
+%% os:cmd/1 folds stderr in, and a usage message can split into as many fields
+%% as real output, so counting columns is not enough.
+-spec is_ps_number(string()) -> boolean().
+is_ps_number(Field) ->
+    case string:to_float(Field) of
+        {Float, []} when Float >= 0.0 ->
+            true;
+        _ ->
+            case string:to_integer(Field) of
+                {Int, []} when Int >= 0 -> true;
+                _ -> false
+            end
+    end.
+
+%% @doc Runs Cmd once, keeping it only if ParseOutput accepts the output.
+%% A ps lacking the wanted columns will never gain them, so the no_ps
+%% verdict is settled at view start and the render loop skips os:cmd/1.
+-spec resolve_ps_cmd(Cmd, ParseOutput) -> Cmd | no_ps when
+    Cmd :: iodata(),
+    ParseOutput :: fun((string()) -> {ok, term()} | {ok, term(), term()} | error).
+resolve_ps_cmd(Cmd, ParseOutput) ->
+    case ParseOutput(os:cmd(Cmd)) of
+        error -> no_ps;
+        _Accepted -> Cmd
+    end.
+
+%% @doc Reads one "Field:  <N> kB" line from /proc/<Pid>/status, e.g. VmRSS.
+-spec proc_status_field_kb(string(), string()) -> non_neg_integer() | undefined.
+proc_status_field_kb(Pid, Field) ->
+    case file:read_file("/proc/" ++ Pid ++ "/status") of
+        {ok, Bin} -> match_kb_line(Bin, Field);
+        {error, _} -> undefined
+    end.
+
+%% @doc Total system memory in kB, from /proc/meminfo's MemTotal line.
+-spec proc_meminfo_total_kb() -> non_neg_integer() | undefined.
+proc_meminfo_total_kb() ->
+    case file:read_file("/proc/meminfo") of
+        {ok, Bin} -> match_kb_line(Bin, "MemTotal");
+        {error, _} -> undefined
+    end.
+
+%% @doc This OS process' resident memory as a percent of total system
+%% memory (VmRSS / MemTotal), or "--" when /proc is unavailable.
+-spec proc_mem_percent() -> string().
+proc_mem_percent() ->
+    RssKb = proc_status_field_kb(os:getpid(), "VmRSS"),
+    TotalKb = proc_meminfo_total_kb(),
+    case {RssKb, TotalKb} of
+        {undefined, _} ->
+            "--";
+        {_, undefined} ->
+            "--";
+        {_, 0} ->
+            "--";
+        {_, _} ->
+            erlang:float_to_list(RssKb * 100 / TotalKb, [{decimals, 1}])
+    end.
+
+match_kb_line(Bin, Field) ->
+    Pattern = "^" ++ Field ++ ":[ \t]*([0-9]+)[ \t]*kB",
+    case re:run(Bin, Pattern, [multiline, {capture, [1], list}]) of
+        {match, [Value]} -> list_to_integer(Value);
+        nomatch -> undefined
+    end.
+
+%% @doc Samples this OS process' CPU time (user+sys, from /proc/self/stat
+%% fields 14/15) alongside a monotonic timestamp.
+-spec cpu_time_sample() -> cpu_sample() | undefined.
+cpu_time_sample() ->
+    case file:read_file("/proc/self/stat") of
+        {ok, Bin} ->
+            case parse_proc_stat_utime_stime(Bin) of
+                {Utime, Stime} -> {Utime + Stime, erlang:monotonic_time(millisecond)};
+                undefined -> undefined
+            end;
+        {error, _} ->
+            undefined
+    end.
+
+%% /proc/[pid]/stat's 2nd field (comm) is parenthesized and may itself
+%% contain spaces/parens, so utime/stime (fields 14/15) must be located by
+%% counting fields after the last ")", not by naive whitespace-splitting.
+parse_proc_stat_utime_stime(Bin) ->
+    case string:split(binary_to_list(Bin), ")", trailing) of
+        [_, Rest] ->
+            case string:split(string:trim(Rest, leading), " ", all) of
+                Fields when length(Fields) >= 14 ->
+                    Utime = lists:nth(12, Fields),
+                    Stime = lists:nth(13, Fields),
+                    {list_to_integer(Utime), list_to_integer(Stime)};
+                _ ->
+                    undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+%% @doc CPU percent as "NN.N" between two cpu_time_sample/0 results, or
+%% "--" with no sample or a non-positive window. May exceed 100 on multicore.
+-spec cpu_percent(cpu_sample() | undefined, cpu_sample() | undefined) -> string().
+cpu_percent(undefined, _Cur) ->
+    "--";
+cpu_percent(_Prev, undefined) ->
+    "--";
+cpu_percent({PrevTicks, PrevMs}, {CurTicks, CurMs}) ->
+    ElapsedMs = CurMs - PrevMs,
+    case ElapsedMs > 0 of
+        true ->
+            TickMs = (CurTicks - PrevTicks) * 1000 / ?CLOCK_TICKS_PER_SEC,
+            Percent = TickMs * 100 / ElapsedMs,
+            erlang:float_to_list(max(Percent, 0.0), [{decimals, 1}]);
+        false ->
+            "--"
+    end.
+
+%% @doc Like cpu_percent/2, but rate-limited to ?MIN_INTERVAL: an off-cadence
+%% render (system view on {new_interval, _}) would divide by a tiny window.
+-spec cpu_percent_gauge(cpu_gauge() | undefined, cpu_sample() | undefined) ->
+    {cpu_gauge(), string()}.
+cpu_percent_gauge(Gauge, CurSample) ->
+    case Gauge of
+        undefined ->
+            {{CurSample, "--"}, "--"};
+        {undefined, _LastPercent} ->
+            {{CurSample, "--"}, "--"};
+        {RefSample, LastPercent} ->
+            case sample_age_ms(RefSample, CurSample) of
+                Age when Age >= ?MIN_INTERVAL ->
+                    Percent = cpu_percent(RefSample, CurSample),
+                    {{CurSample, Percent}, Percent};
+                _ ->
+                    {{RefSample, LastPercent}, LastPercent}
+            end
+    end.
+
+sample_age_ms(undefined, _Cur) ->
+    0;
+sample_age_ms(_Ref, undefined) ->
+    0;
+sample_age_ms({_, RefMs}, {_, CurMs}) ->
+    CurMs - RefMs.
 
 -spec pipe(Acc, FunList :: [F]) -> Acc2 when
     Acc :: term(),

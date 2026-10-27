@@ -28,6 +28,135 @@ render_keeps_unicode_text_test() ->
     Line = observer_cli_lib:render([?W("中文", 10)]),
     ?assert(string:find(Line, "中文") =/= nomatch).
 
+ps_output_fields_test() ->
+    ?assertEqual(
+        ["1.5", "0.3", "12345", "67890"],
+        observer_cli_lib:ps_output_fields("header\n 1.5 0.3 12345 67890\n")
+    ),
+    ?assertEqual(["1.5", "0.3"], observer_cli_lib:ps_output_fields("header\n 1.5 0.3\n")),
+    ?assertEqual([], observer_cli_lib:ps_output_fields("header\n")),
+    ?assertEqual([], observer_cli_lib:ps_output_fields("")),
+    ?assertEqual([], observer_cli_lib:ps_output_fields("ps: not found")),
+    ?assertEqual(
+        ["BusyBox", "v1.36.1", "multi-call", "binary."],
+        observer_cli_lib:ps_output_fields(
+            "ps: invalid option -- 'o'\nBusyBox v1.36.1 multi-call binary.\n"
+        )
+    ),
+    ?assertEqual(
+        6,
+        length(
+            observer_cli_lib:ps_output_fields(
+                "ps: invalid option -- 'o'\n"
+                "BusyBox v1.37.0 (Ubuntu 1:1.37.0) multi-call binary.\n"
+            )
+        )
+    ).
+
+is_ps_number_test() ->
+    lists:foreach(
+        fun(Field) -> ?assert(observer_cli_lib:is_ps_number(Field)) end,
+        ["0", "0.0", "1.5", "277", "85184", "0.2", "1,5"]
+    ),
+    lists:foreach(
+        fun(Field) -> ?assertNot(observer_cli_lib:is_ps_number(Field)) end,
+        ["BusyBox", "v1.37.0", "multi-call", "binary.", "12k", "", "-1", "-0.5", "1.5x"]
+    ).
+
+proc_status_field_kb_test() ->
+    case os:type() of
+        {unix, linux} ->
+            Kb = observer_cli_lib:proc_status_field_kb(os:getpid(), "VmRSS"),
+            ?assert(is_integer(Kb)),
+            ?assert(Kb > 0),
+            ?assertEqual(
+                undefined, observer_cli_lib:proc_status_field_kb(os:getpid(), "NoSuchField")
+            ),
+            ?assertEqual(undefined, observer_cli_lib:proc_status_field_kb("999999999", "VmRSS"));
+        _ ->
+            ?assertEqual(undefined, observer_cli_lib:proc_status_field_kb(os:getpid(), "VmRSS"))
+    end.
+
+proc_meminfo_total_kb_test() ->
+    case os:type() of
+        {unix, linux} ->
+            Kb = observer_cli_lib:proc_meminfo_total_kb(),
+            ?assert(is_integer(Kb)),
+            ?assert(Kb > 0);
+        _ ->
+            ?assertEqual(undefined, observer_cli_lib:proc_meminfo_total_kb())
+    end.
+
+proc_mem_percent_test() ->
+    case os:type() of
+        {unix, linux} ->
+            ?assertNotEqual("--", observer_cli_lib:proc_mem_percent());
+        _ ->
+            ?assertEqual("--", observer_cli_lib:proc_mem_percent())
+    end.
+
+cpu_time_sample_test() ->
+    case os:type() of
+        {unix, linux} ->
+            ?assertMatch({_, _}, observer_cli_lib:cpu_time_sample());
+        _ ->
+            ?assertEqual(undefined, observer_cli_lib:cpu_time_sample())
+    end.
+
+parse_proc_stat_utime_stime_test() ->
+    %% Fields 14/15 of a real beam.smp /proc/<pid>/stat line.
+    Real =
+        <<
+            "90 (beam.smp) S 86 90 90 34816 90 4194304 1630094 0 80 0 724422 644262 0 0 20 0 "
+            "25 0 145 208121856 30591 4294967295 4943872 9479744 3203324448 0 0 0 0 69760 "
+            "134365702 0 0 0 17 0 0 0 0 0 0 9484776 9570028 9748480 3203324929 3203325420 "
+            "3203325420 3203325913 0\n"
+        >>,
+    ?assertEqual({724422, 644262}, observer_cli_lib:parse_proc_stat_utime_stime(Real)),
+    %% comm may contain spaces, so the fields cannot be located by a naive
+    %% whitespace split.
+    Spaces =
+        <<
+            "456 (my proc name) S 1 456 456 0 -1 4194304 100 0 0 0 11 22 0 0 20 0 4 0 999 0 0 "
+            "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+        >>,
+    ?assertEqual({11, 22}, observer_cli_lib:parse_proc_stat_utime_stime(Spaces)),
+    Paren =
+        <<
+            "123 (my)proc) S 1 123 123 0 -1 4194304 100 0 0 0 55 66 0 0 20 0 4 0 999 0 0 0 0 "
+            "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+        >>,
+    ?assertEqual({55, 66}, observer_cli_lib:parse_proc_stat_utime_stime(Paren)),
+    %% Truncated or unparseable content yields undefined rather than crashing.
+    ?assertEqual(undefined, observer_cli_lib:parse_proc_stat_utime_stime(<<"123 (beam) S 1 2\n">>)),
+    ?assertEqual(undefined, observer_cli_lib:parse_proc_stat_utime_stime(<<"no parens here\n">>)).
+
+cpu_percent_test() ->
+    ?assertEqual("--", observer_cli_lib:cpu_percent(undefined, {0, 0})),
+    ?assertEqual("--", observer_cli_lib:cpu_percent({0, 0}, undefined)),
+    ?assertEqual("--", observer_cli_lib:cpu_percent({0, 100}, {0, 100})),
+    ?assertEqual("0.0", observer_cli_lib:cpu_percent({0, 0}, {0, 1000})),
+    ?assertEqual("50.0", observer_cli_lib:cpu_percent({0, 0}, {50, 1000})),
+    ?assertEqual("100.0", observer_cli_lib:cpu_percent({0, 0}, {100, 1000})).
+
+cpu_percent_gauge_first_call_test() ->
+    ?assertEqual({{{0, 0}, "--"}, "--"}, observer_cli_lib:cpu_percent_gauge(undefined, {0, 0})).
+
+cpu_percent_gauge_holds_below_min_interval_test() ->
+    %% A fast redraw mode (e.g. Home's proc_window, every 10ms) must not
+    %% recompute cpu% over such a short window: the gauge holds the last
+    %% percent (here "--", from the very first call) instead of dividing
+    %% by a near-zero elapsed time.
+    {Gauge1, "--"} = observer_cli_lib:cpu_percent_gauge(undefined, {0, 0}),
+    {Gauge2, Percent2} = observer_cli_lib:cpu_percent_gauge(Gauge1, {5, 10}),
+    ?assertEqual("--", Percent2),
+    ?assertEqual(Gauge1, Gauge2).
+
+cpu_percent_gauge_advances_after_min_interval_test() ->
+    {Gauge1, "--"} = observer_cli_lib:cpu_percent_gauge(undefined, {0, 0}),
+    {_Gauge2, Percent2} = observer_cli_lib:cpu_percent_gauge(Gauge1, {50, 1000}),
+    ?assertEqual("50.0", Percent2).
+
 layout_width_keeps_base_width_test() ->
     BaseWidth = observer_cli_lib:layout_base_width(),
     [

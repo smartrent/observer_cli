@@ -168,12 +168,16 @@ Enabling scheduler utilization changes the node-wide `scheduler_wall_time` syste
 | `Ets Limit` | ETS table limit, shown instead of `Atom Count` when `atom_limit` is unsupported | Stable | `system_info(ets_limit)` |
 | `Version` | OTP release | Stable | `system_info(otp_release)` |
 | `ps -o pcpu` | CPU percentage reported by the host `ps` command for the BEAM OS process | Current | `ps -o pcpu PID` |
+| `cpu rate` | Replaces `ps -o pcpu` where `ps` lacks `-o`; rate over the refresh interval, not a lifetime average, and may exceed 100 on multicore | Current | `/proc/self/stat` |
 | `ps -o pmem` | Memory percentage reported by the host `ps` command for the BEAM OS process | Current | `ps -o pmem PID` |
+| `/proc pmem` | Replaces `ps -o pmem` where `ps` lacks `-o`; same quantity, different source | Current | `VmRSS`/`MemTotal` |
 | `Active Task` | Active processes and Ports ready or running on normal and dirty-CPU schedulers; dirty IO is excluded | Current | `statistics(total_active_tasks)` |
 | `Context Switch` | VM context-switch count | Total | `statistics(context_switches)` |
 | `Reds(Total/SinceLastCall)` | Total reductions / reductions since this API was last called | Total / API-call increment | `statistics(reductions)` |
 
-`ps` fields display `--` when observer_cli cannot parse the command output.
+`ps -o` support is probed once per session. Where it is missing (BusyBox, e.g.
+Nerves) these fields come from `/proc` and are relabelled to name that source.
+`--` means neither source was readable.
 
 ### Memory, IO, and GC fields
 
@@ -429,6 +433,7 @@ the page does not calculate interval deltas.
 | Memory | `Total`, `Processes`, `Atoms`, `Binaries`, `Code`, `Ets` | Bytes and percent of total | Corresponding `memory()` keys |
 | Statistics | `ps -o pcpu`, `ps -o pmem` | Host `ps` CPU and memory percentages for the BEAM OS process | `ps` |
 | Statistics | `ps -o rss`, `ps -o vsz` | Resident and virtual memory reported by `ps`, converted for byte display | `ps` |
+| Statistics | `cpu rate`, `/proc pmem`, `/proc rss`, `/proc vsz` | Replace the `ps -o` rows where `ps` lacks `-o`; `cpu rate` is a rate over the refresh interval, not a lifetime average | `/proc/self/stat`, `VmRSS`/`MemTotal`, `VmRSS`, `VmSize` |
 | Statistics | `Total IOIn`, `Total IOOut` | Cumulative bytes through VM Ports | `statistics(io)` |
 
 System `Processes` and `Atoms` use the allocated-memory keys `processes` and

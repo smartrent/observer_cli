@@ -12,9 +12,11 @@
 -ifdef(TEST).
 -export([
     collect_distribution_info/0,
-    collect_os_process_info/1,
-    collect_system_info/1,
-    collect_sys_info/1,
+    collect_os_process_info/2,
+    resolve_ps_cmd/1,
+    sys_ps_cmd/1,
+    collect_system_info/2,
+    collect_sys_info/2,
     fill_info/2,
     to_list/1,
     info_fields/0,
@@ -27,7 +29,7 @@
     get_alloc/5,
     render_dist_node_info/1,
     get_address/1,
-    render_worker/3,
+    render_worker/4,
     get_dist_queue_size/1,
     format_count_limit/2,
     collect_runtime_info/0,
@@ -35,6 +37,14 @@
     maybe_system_info/1
 ]).
 -endif.
+
+%% ps -o pcpu is a lifetime average; the /proc fallback is an instantaneous
+%% rate over the refresh interval. Different quantity, so a different label.
+%% pmem/rss/vsz are the same quantity either way, so those only name the source.
+-define(PROC_CPU_LABEL, "cpu rate").
+-define(PROC_MEM_LABEL, "/proc pmem").
+-define(PROC_RSS_LABEL, "/proc rss").
+-define(PROC_VSZ_LABEL, "/proc vsz").
 
 -define(UTIL_ALLOCATORS, [
     binary_alloc,
@@ -51,13 +61,19 @@
 %% @doc List System and Architecture, CPU's and Threads metrics  in observer's system
 %%  List Memory Allocators: std, ll, eheap, ets, fix, binary, driver.
 -spec start(ViewOpts) -> no_return() when ViewOpts :: view_opts().
-start(#view_opts{sys = #system{interval = Interval}} = ViewOpts) ->
+start(#view_opts{sys = #system{interval = Interval}, ps_cmd = HomePsCmd} = ViewOpts) ->
     Pid = spawn_link(fun() ->
         ?output(?CLEAR),
-        Cmd = io_lib:format("ps -o pcpu,pmem,rss,vsz ~s", [os:getpid()]),
-        render_worker(Cmd, Interval, ?INIT_TIME_REF)
+        render_worker(sys_ps_cmd(HomePsCmd), Interval, ?INIT_TIME_REF, undefined)
     end),
     manager(Pid, ViewOpts).
+
+%% A ps that cannot do Home's pcpu,pmem cannot do rss,vsz either. Not transitive
+%% the other way, so a verdict reached here is not written back.
+sys_ps_cmd(no_ps) ->
+    no_ps;
+sys_ps_cmd(_HomePsCmd) ->
+    resolve_ps_cmd(io_lib:format("ps -o pcpu,pmem,rss,vsz ~s 2>/dev/null", [os:getpid()])).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Private
@@ -74,8 +90,8 @@ manager(Pid, #view_opts{sys = AllocatorOpts} = ViewOpts) ->
             manager(Pid, ViewOpts)
     end.
 
-render_worker(Cmd, Interval, LastTimeRef) ->
-    SystemInfo = collect_system_info(Cmd),
+render_worker(Cmd, Interval, LastTimeRef, CpuGauge) ->
+    {SystemInfo, NewCpuGauge} = collect_system_info(Cmd, CpuGauge),
     Text = "Interval: " ++ integer_to_list(Interval) ++ "ms",
     Menu = observer_cli_lib:render_top_menu(allocator, Text),
     LastLine = observer_cli_lib:render_footer("q(quit)"),
@@ -83,17 +99,21 @@ render_worker(Cmd, Interval, LastTimeRef) ->
     NextTimeRef = observer_cli_lib:next_redraw(LastTimeRef, Interval),
     receive
         quit -> quit;
-        {new_interval, NewInterval} -> render_worker(Cmd, NewInterval, NextTimeRef);
-        redraw -> render_worker(Cmd, Interval, NextTimeRef)
+        {new_interval, NewInterval} -> render_worker(Cmd, NewInterval, NextTimeRef, NewCpuGauge);
+        redraw -> render_worker(Cmd, Interval, NextTimeRef, NewCpuGauge)
     end.
 
-collect_system_info(Cmd) ->
-    {OsProcessInfo, SysInfo} = split_os_process_info(collect_sys_info(Cmd)),
-    #{
-        os_process_info => OsProcessInfo,
-        sys_info => SysInfo,
-        allocator_info => collect_allocator_info(),
-        dist_nodes_info => collect_distribution_info()
+collect_system_info(Cmd, CpuGauge) ->
+    {SysInfoAll, NewCpuGauge} = collect_sys_info(Cmd, CpuGauge),
+    {OsProcessInfo, SysInfo} = split_os_process_info(SysInfoAll),
+    {
+        #{
+            os_process_info => OsProcessInfo,
+            sys_info => SysInfo,
+            allocator_info => collect_allocator_info(),
+            dist_nodes_info => collect_distribution_info()
+        },
+        NewCpuGauge
     }.
 
 split_os_process_info(SysInfo) ->
@@ -457,8 +477,9 @@ render_sys_info(SysInfo) ->
     {_, _, Statistics} = lists:keyfind("Statistics", 1, MemAndStatistics),
     render_sys_info(System, CPU, Memory, Statistics) ++ render_runtime_limit_info(SysInfo).
 
-collect_sys_info(Cmd) ->
-    collect_os_process_info(Cmd) ++ collect_runtime_info().
+collect_sys_info(Cmd, CpuGauge) ->
+    {OsProcessInfo, NewCpuGauge} = collect_os_process_info(Cmd, CpuGauge),
+    {OsProcessInfo ++ collect_runtime_info(), NewCpuGauge}.
 
 render_sys_info(System, CPU, Memory, Statistics) ->
     [
@@ -617,20 +638,63 @@ format_count_limit(Count, Limit) when is_integer(Count), is_integer(Limit), Limi
 format_count_limit(Count, Limit) ->
     [to_list(Count), " / ", to_list(Limit)].
 
-collect_os_process_info(Cmd) ->
-    [_, CmdValue | _] = string:split(os:cmd(Cmd), "\n", all),
-    [CpuPsV, MemPsV, RssPsV, VszPsV] =
-        case lists:filter(fun(Y) -> Y =/= [] end, string:split(CmdValue, " ", all)) of
-            [] -> ["--", "--", "--", "--"];
-            [V1, V2, V3, V4] -> [V1, V2, list_to_integer(V3) * 1024, list_to_integer(V4) * 1024]
-        end,
+collect_os_process_info(no_ps, CpuGauge) ->
+    proc_fallback_os_process_info(CpuGauge);
+collect_os_process_info(Cmd, CpuGauge) ->
+    case ps_columns(os:cmd(Cmd)) of
+        {ok, {CpuV, MemV, RssKb, VszKb}} ->
+            OsProcessInfo = [
+                {ps_cpu, {"ps -o pcpu", CpuV ++ "%"}},
+                {ps_mem, {"ps -o pmem", MemV ++ "%"}},
+                {ps_rss, {"ps -o rss", RssKb * 1024}},
+                {ps_vsz, {"ps -o vsz", VszKb * 1024}}
+            ],
+            {OsProcessInfo, CpuGauge};
+        error ->
+            proc_fallback_os_process_info(CpuGauge)
+    end.
 
-    [
-        {ps_cpu, CpuPsV ++ "%"},
-        {ps_mem, MemPsV ++ "%"},
-        {ps_rss, RssPsV},
-        {ps_vsz, VszPsV}
-    ].
+resolve_ps_cmd(Cmd) ->
+    observer_cli_lib:resolve_ps_cmd(Cmd, fun ps_columns/1).
+
+ps_columns(Output) ->
+    case observer_cli_lib:ps_output_fields(Output) of
+        [CpuV, MemV, RssV, VszV] ->
+            case {observer_cli_lib:is_ps_number(CpuV), observer_cli_lib:is_ps_number(MemV)} of
+                {true, true} -> ps_memory_columns(CpuV, MemV, RssV, VszV);
+                _ -> error
+            end;
+        _ ->
+            error
+    end.
+
+ps_memory_columns(CpuV, MemV, RssV, VszV) ->
+    case {to_kb(RssV), to_kb(VszV)} of
+        {{ok, RssKb}, {ok, VszKb}} -> {ok, {CpuV, MemV, RssKb, VszKb}};
+        _ -> error
+    end.
+
+to_kb(Field) ->
+    case string:to_integer(Field) of
+        {Kb, []} when is_integer(Kb), Kb >= 0 -> {ok, Kb};
+        _ -> error
+    end.
+
+proc_fallback_os_process_info(CpuGauge) ->
+    RssKb = observer_cli_lib:proc_status_field_kb(os:getpid(), "VmRSS"),
+    VszKb = observer_cli_lib:proc_status_field_kb(os:getpid(), "VmSize"),
+    CurCpuSample = observer_cli_lib:cpu_time_sample(),
+    {NewCpuGauge, CpuPercent} = observer_cli_lib:cpu_percent_gauge(CpuGauge, CurCpuSample),
+    OsProcessInfo = [
+        {ps_cpu, {?PROC_CPU_LABEL, CpuPercent ++ "%"}},
+        {ps_mem, {?PROC_MEM_LABEL, observer_cli_lib:proc_mem_percent() ++ "%"}},
+        {ps_rss, {?PROC_RSS_LABEL, proc_fallback_bytes(RssKb)}},
+        {ps_vsz, {?PROC_VSZ_LABEL, proc_fallback_bytes(VszKb)}}
+    ],
+    {OsProcessInfo, NewCpuGauge}.
+
+proc_fallback_bytes(undefined) -> "--";
+proc_fallback_bytes(Kb) -> Kb * 1024.
 
 collect_runtime_info() ->
     MemInfo =
@@ -704,6 +768,11 @@ fill_info([{dynamic, Key} | Rest], Data) when is_atom(Key) ->
         undefined -> [undefined | fill_info(Rest, Data)];
         {Str, Value} -> [{Str, Value} | fill_info(Rest, Data)]
     end;
+fill_info([{dynamic, {Format, Key}} | Rest], Data) when is_atom(Key) ->
+    case proplists:get_value(Key, Data) of
+        undefined -> [undefined | fill_info(Rest, Data)];
+        {Str, Value} -> [{Str, {Format, Value}} | fill_info(Rest, Data)]
+    end;
 fill_info([{Str, Key} | Rest], Data) when is_atom(Key) ->
     case proplists:get_value(Key, Data) of
         undefined -> [undefined | fill_info(Rest, Data)];
@@ -767,10 +836,10 @@ info_fields() ->
             {"Ets", {bytes, ets}}
         ]},
         {"Statistics", right, [
-            {"ps -o pcpu", ps_cpu},
-            {"ps -o pmem", ps_mem},
-            {"ps -o rss", {bytes, ps_rss}},
-            {"ps -o vsz", {bytes, ps_vsz}},
+            {dynamic, ps_cpu},
+            {dynamic, ps_mem},
+            {dynamic, {bytes, ps_rss}},
+            {dynamic, {bytes, ps_vsz}},
             {"Total IOIn", {bytes, io_input}},
             {"Total IOOut", {bytes, io_output}}
         ]}
