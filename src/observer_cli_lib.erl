@@ -552,7 +552,7 @@ resolve_ps_cmd(Cmd, ParseOutput) ->
         _Accepted -> Cmd
     end.
 
-%% @doc Reads one "Field:  <N> kB" line from /proc/<Pid>/status, e.g. VmRSS.
+%% @doc Reads one "Field:  &lt;N&gt; kB" line from /proc/&lt;Pid&gt;/status, e.g. VmRSS.
 -spec proc_status_field_kb(string(), string()) -> non_neg_integer() | undefined.
 proc_status_field_kb(Pid, Field) ->
     case file:read_file("/proc/" ++ Pid ++ "/status") of

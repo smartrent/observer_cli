@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/zhongwencool/observer_cli/workflows/ci/badge.svg)](https://github.com/zhongwencool/observer_cli/actions)
 [![codecov](https://codecov.io/gh/zhongwencool/observer_cli/branch/main/graph/badge.svg)](https://codecov.io/gh/zhongwencool/observer_cli)
-[![GitHub tag](https://img.shields.io/github/tag/zhongwencool/observer_cli.svg)](https://github.com/zhongwencool/observer_cli)
+[![GitHub tag](https://img.shields.io/github/tag/smartrent/observer_cli.svg)](https://github.com/smartrent/observer_cli)
 [![MIT License](https://img.shields.io/hexpm/l/observer_cli.svg)](https://hex.pm/packages/observer_cli)
 [![Hex.pm Version](https://img.shields.io/hexpm/v/observer_cli.svg)](https://hex.pm/packages/observer_cli)
 [![Hex.pm Downloads](https://img.shields.io/hexpm/dt/observer_cli.svg)](https://hex.pm/packages/observer_cli)
@@ -24,7 +24,7 @@ process rankings](https://raw.githubusercontent.com/zhongwencool/observer_cli/8e
 ## Installation
 
 Install `observer_cli` in the target release so command diagnostics can run
-there. Version 2.0 controllers require the matching `2.0.0` target bundle.
+there. Version 2.1 controllers require the matching `2.1.0` target bundle.
 Observer CLI 2.0 supports Erlang/OTP 26–29. JSON output requires OTP 27 or
 newer on the controller; text and Erlang-term output work across the supported
 range.
@@ -36,7 +36,7 @@ Add the dependency to `rebar.config`:
 
 ```erlang
 {deps, [
-    {observer_cli, "2.0.0"}
+    {observer_cli, {git, "https://github.com/smartrent/observer_cli.git", {tag, "v2.1.0"}}}
 ]}.
 ```
 
@@ -53,7 +53,7 @@ Add the dependency to `mix.exs`:
 ```elixir
 defp deps do
   [
-    {:observer_cli, "2.0.0"}
+    {:observer_cli, git: "https://github.com/smartrent/observer_cli", tag: "v2.1.0"},
   ]
 end
 ```
@@ -79,7 +79,7 @@ On macOS or Linux, the versioned installer selects the escript for the local
 OTP major, verifies its release checksum, and installs it for the current user:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zhongwencool/observer_cli/v2.0.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/smartrent/observer_cli/v2.1.0/install.sh | sh
 ```
 
 Add `$HOME/.local/bin` to `PATH` if the installer asks you to.
@@ -89,9 +89,9 @@ Add `$HOME/.local/bin` to `PATH` if the installer asks you to.
 Build the same version from its release tag instead:
 
 ```sh
-VERSION=2.0.0
+VERSION=2.1.0
 git clone --branch "v${VERSION}" --depth 1 \
-  https://github.com/zhongwencool/observer_cli.git
+  https://github.com/smartrent/observer_cli.git
 cd observer_cli
 ```
 
@@ -153,7 +153,7 @@ the response, and stops the controller before returning.
 - Explore the same node interactively through detailed TUI pages and plugins.
 
 The normative machine-readable response contract is published as
-[`priv/schema/observer_cli.cli.v1.schema.json`](https://raw.githubusercontent.com/zhongwencool/observer_cli/v2.0.0/priv/schema/observer_cli.cli.v1.schema.json).
+[`priv/schema/observer_cli.cli.v1.schema.json`](https://raw.githubusercontent.com/smartrent/observer_cli/v2.1.0/priv/schema/observer_cli.cli.v1.schema.json).
 
 ## Choose CLI or TUI
 
@@ -162,7 +162,7 @@ The normative machine-readable response contract is published as
 | **CLI — recommended** | Production runbooks, automation, incident capture, and AI-agent workflows | `observer_cli diagnose` |
 | TUI | Live exploration, ranking changes, and detail drill-down | `observer_cli tui app@host` |
 
-The CLI requires `observer_cli` 2.0.0 in the target release and does not inject
+The CLI requires `observer_cli` 2.1.0 in the target release and does not inject
 missing diagnostic code. The TUI can load its matching interactive bundle on a
 trusted target before starting. The old bare
 `observer_cli NODE [COOKIE REFRESH_MS]` form is not supported; use the explicit
