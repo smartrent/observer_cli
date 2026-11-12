@@ -2,6 +2,20 @@
 
 Release and maintenance changes, newest first.
 
+## 2.1.0
+
+- Added a `/proc` fallback for the Home and System `ps` fields on hosts whose
+  `ps` lacks `-o`, such as BusyBox on Nerves. `ps -o` support is probed once
+  per session, and the TUI no longer runs `ps` on every render when it is
+  missing.
+- Shown `cpu rate` in place of `ps -o pcpu` on the fallback. It is a rate over
+  the refresh interval, not a lifetime average, and may exceed 100 on
+  multicore hosts.
+- Relabelled the memory fields to `/proc pmem`, `/proc rss`, and `/proc vsz`
+  on the fallback, sourced from `VmRSS`, `VmSize`, and `MemTotal`.
+- Redirected `ps` stderr to `/dev/null` so usage messages are not parsed as
+  output.
+
 ## 2.0.0 (release candidate)
 
 - Added `mix escript.build` as an alternative source build for the controller,

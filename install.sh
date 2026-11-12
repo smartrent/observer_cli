@@ -2,8 +2,8 @@
 
 set -eu
 
-VERSION=2.0.0
-RELEASE_URL="https://github.com/zhongwencool/observer_cli/releases/download/v$VERSION"
+VERSION=2.1.0
+RELEASE_URL="https://github.com/smartrent/observer_cli/releases/download/v$VERSION"
 INSTALL_DIR="$HOME/.local/bin"
 
 for cmd in curl erl escript awk install; do

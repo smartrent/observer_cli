@@ -1337,7 +1337,7 @@ health_command_text_reports_test() ->
     ).
 
 command_text_and_error_encoding_test() ->
-    Capabilities = #{<<"protocol_version">> => 1, <<"bundle_version">> => <<"2.0.0">>},
+    Capabilities = #{<<"protocol_version">> => 1, <<"bundle_version">> => <<"2.1.0">>},
     ContextData = #{
         <<"node">> => <<"target@host">>,
         <<"name_mode">> => <<"short">>,
@@ -1456,7 +1456,7 @@ command_text_and_error_encoding_test() ->
     ).
 
 text_encoder_public_edge_contract_test() ->
-    Capabilities = #{<<"protocol_version">> => 1, <<"bundle_version">> => <<"2.0.0">>},
+    Capabilities = #{<<"protocol_version">> => 1, <<"bundle_version">> => <<"2.1.0">>},
     Incompatible = observer_cli_cli:response(
         connect,
         complete,
